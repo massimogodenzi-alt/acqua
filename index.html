@@ -1,0 +1,12 @@
+<!doctype html><html lang="it"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Treblex Acqua Lazio</title><style>body{font:16px system-ui;background:#edf5fa;color:#123;max-width:780px;margin:45px auto;padding:20px}main{background:white;padding:28px;border-radius:18px}input,button{font:inherit;padding:12px;border-radius:8px}input{width:60%;border:1px solid #bbb}button{background:#006c90;color:white;border:0;cursor:pointer}article{padding:14px;border:1px solid #ddd;margin:12px 0;border-radius:8px}small{color:#567}</style><main><h1>Treblex · Acqua Lazio</h1><p><strong>Prototipo sperimentale</strong> — ricerca dei rapporti Acqualatina. Non copre ancora tutti i gestori del Lazio.</p><label for="comune">Comune servito da Acqualatina</label><p><input id="comune" placeholder="Es. Latina"><button onclick="search()">Cerca</button></p><div id="out" role="status"></div><small>Le informazioni non sostituiscono il rapporto ufficiale della zona di distribuzione.</small></main><script>
+const out=document.getElementById('out');
+function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+async function search(){
+let comune=document.getElementById('comune').value.trim();if(comune.length<2)return;
+out.textContent='Ricerca in corso…';
+try{let r=await fetch('/api/rapporti?comune='+encodeURIComponent(comune));let j=await r.json();if(!r.ok)throw Error(j.detail||'Errore');
+out.innerHTML='<h2>Risultati: '+esc(comune)+'</h2>'+(!j.rapporti.length?'<p>Nessun rapporto trovato automaticamente. Non significa che le analisi non esistano.</p>':'');
+for(let x of j.rapporti){let a=document.createElement('article');let h=document.createElement('p');h.textContent=x.titolo;let link=document.createElement('a');link.href=x.url;link.target='_blank';link.rel='noopener';link.textContent='Apri PDF ufficiale';let b=document.createElement('button');b.textContent='Leggi parametri (sperimentale)';let div=document.createElement('div');b.onclick=async()=>{div.textContent='Lettura in corso…';try{let r=await fetch('/api/analisi?url='+encodeURIComponent(x.url));let j=await r.json();if(!r.ok)throw Error(j.detail);div.textContent=(j.righe_da_verificare||[]).map(z=>z.parametro+': '+z.riga_originale).join('\n')||'Nessuna riga riconosciuta';div.style.whiteSpace='pre-wrap'}catch(e){div.textContent=e.message}};a.append(h,link,document.createElement('br'),b,div);out.append(a)}
+}catch(e){out.textContent='Errore: '+e.message}
+}
+</script></html>
