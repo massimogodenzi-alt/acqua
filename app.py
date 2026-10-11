@@ -1,5 +1,7 @@
 """Treblex Acqua Lazio: acquisizione sperimentale dei rapporti Acqualatina."""
 import io
+import csv
+import openpyxl
 import re
 import unicodedata
 from pathlib import Path
@@ -185,7 +187,7 @@ def parse_pdf(data):
     # Le righe dei rapporti Acqualatina contengono spesso:
     # parametro | unità | limite/riferimento | valore misurato.
     # Non confondere il limite con il valore.
-    pattern = re.compile(r"(?<![\\w])(?:<\\s*)?\\d+(?:[.,]\\d+)?")
+    pattern = re.compile(r"(?<![\w])(?:<\s*)?\d+(?:[.,]\d+)?")
     with pdfplumber.open(io.BytesIO(data)) as pdf:
         for page in pdf.pages[:8]:
             text = page.extract_text() or ""
@@ -225,11 +227,50 @@ def parse_html(data):
             label = normalize(cells[0])
             for names in PARAMS.values():
                 if any(label == normalize(name) or label.startswith(normalize(name) + " ") for name in names):
-                    value = next((x for x in cells[1:] if re.search(r"(?<!\\w)[<>≤≥]?\\s*\\d+(?:[.,]\\d+)?", x)), None)
+                    value = next((x for x in cells[1:] if re.search(r"(?<!\w)[<>≤≥]?\s*\d+(?:[.,]\d+)?", x)), None)
                     if value:
                         findings.append({"parametro": names[0], "riga_originale": " | ".join(cells),
                                          "stato": "DA_VERIFICARE", "formato": "HTML"})
     return findings
+
+def parse_rows(rows, kind):
+    findings = []
+    seen = set()
+    numeric = re.compile(r"^\\s*(?:[<>≤≥]\\s*)?\\d+(?:[.,]\\d+)?\\s*$")
+    for row in rows:
+        cells = [str(x if x is not None else "").strip() for x in row]
+        if len(cells) < 2:
+            continue
+        label = normalize(cells[0])
+        for key, labels in PARAMS.items():
+            if key in seen or not any(label == normalize(n) or label.startswith(normalize(n) + " ") for n in labels):
+                continue
+            values = [x for x in cells[1:] if numeric.fullmatch(x)]
+            item = {"parametro": labels[0], "riga_originale": " | ".join(cells)[:300],
+                    "formato": kind, "stato": "DA_VERIFICARE"}
+            if values:
+                item["valore"] = values[-1]
+            findings.append(item)
+            seen.add(key)
+            break
+    return findings
+
+def parse_document(content, content_type="", url=""):
+    kind = content_type.lower()
+    path = urlparse(url).path.lower()
+    if content.startswith(b"%PDF"):
+        return "PDF", parse_pdf(content)
+    if content.startswith(b"PK\\x03\\x04") or path.endswith(".xlsx"):
+        wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+        rows = (row for ws in wb.worksheets[:5] for row in ws.iter_rows(min_row=1, max_row=3000, values_only=True))
+        return "Excel", parse_rows(rows, "Excel")
+    if "csv" in kind or path.endswith(".csv"):
+        decoded = content.decode("utf-8-sig", errors="replace")
+        dialect = csv.Sniffer().sniff(decoded[:2048], delimiters=";,\\t|") if decoded.strip() else csv.excel
+        return "CSV", parse_rows(csv.reader(io.StringIO(decoded), dialect), "CSV")
+    if "html" in kind or content.lstrip().lower().startswith((b"<!doctype", b"<html", b"<table")):
+        return "HTML", parse_html(content)
+    raise ValueError("Formato non supportato: usare PDF, HTML, CSV o XLSX")
 
 @app.get("/api/estrai")
 async def extract(url: str):
@@ -249,14 +290,7 @@ async def extract(url: str):
             response.raise_for_status()
         if len(response.content) > 12000000:
             raise ValueError("Documento troppo grande")
-        if response.content.startswith(b"%PDF"):
-            data = parse_pdf(response.content)
-            kind = "PDF"
-        elif "html" in response.headers.get("content-type", "").lower() or response.content.lstrip().startswith(b"<"):
-            data = parse_html(response.text)
-            kind = "HTML"
-        else:
-            raise ValueError("Formato non ancora supportato")
+        kind, data = parse_document(response.content, response.headers.get("content-type", ""), url)
         return {"documento": url, "formato": kind, "parametri": data,
                 "avviso": "Estrazione preliminare: verificare valori, zona e data sulla fonte."}
     except Exception as exc:
@@ -269,11 +303,11 @@ async def analysis(url: str):
             async with httpx.AsyncClient(timeout=35, follow_redirects=True) as client:
                 response = await client.get(url)
                 response.raise_for_status()
-            if not response.content.startswith(b"%PDF") or len(response.content) > 12000000:
-                raise ValueError("PDF Acea non disponibile")
-            values = parse_pdf(response.content)
-            return {"documento": url, "parametri": values, "righe_da_verificare": values,
-                    "avviso": "Valori sperimentali; controllare la zona e il periodo nel PDF Acea."}
+            if len(response.content) > 12000000:
+                raise ValueError("Documento troppo grande")
+            kind, values = parse_document(response.content, response.headers.get("content-type", ""), url)
+            return {"documento": url, "formato": kind, "parametri": values,
+                    "righe_da_verificare": values, "avviso": "Dati da verificare sul rapporto originale."}
         except Exception as exc:
             raise HTTPException(502, detail="Lettura Acea non riuscita: " + str(exc)[:180])
     if not allowed(url):
