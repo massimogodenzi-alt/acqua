@@ -332,3 +332,28 @@ async def analysis(url: str):
                 "avviso": "Estrazione preliminare: controllare zona, data e valori sul PDF."}
     except Exception as exc:
         raise HTTPException(502, detail="Documento non leggibile: " + str(exc)[:180])
+
+@app.get("/api/controllo-gestori")
+async def controllo_gestori():
+    import asyncio
+    sources = [
+        ("Acqualatina", "Latina / Frosinone", SOURCE, "sperimentale"),
+        ("Acea Ato 2", "Roma", PROVIDER_LINKS["Acea Ato 2"], "parziale"),
+        ("Acea Ato 5", "Frosinone", PROVIDER_LINKS["Acea Ato 5"], "non integrata"),
+        ("Talete", "Viterbo", "https://www.taletespa.eu/", "non integrata"),
+        ("Acqua Pubblica Sabina", "Rieti", "https://www.acquapubblicasabina.it/", "non integrata")
+    ]
+    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+        async def check(name, province, url, extraction):
+            result = {"gestore": name, "province": province, "fonte": url, "estrazione": extraction}
+            try:
+                response = await client.get(url)
+                response.raise_for_status()
+                result["stato"] = "portale_raggiungibile"
+                result["formato"] = response.headers.get("content-type", "").split(";")[0]
+            except Exception:
+                result["stato"] = "verifica_non_riuscita"
+                result["formato"] = "non rilevato"
+            return result
+        checks = await asyncio.gather(*(check(*s) for s in sources))
+    return {"gestori": checks, "nota": "Portale raggiungibile non significa parametri disponibili o estratti."}
