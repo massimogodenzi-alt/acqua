@@ -194,36 +194,48 @@ async def fetch_report(url):
         raise ValueError("Troppi passaggi nel download")
 
 def parse_pdf(data):
+    """Legge le righe delle analisi Acea e conserva il testo originale."""
+    aliases = {
+        "ph": ("Conc. ioni idrogeno", "pH"),
+        "conducibilita": ("Cond. elettrica", "Conducibilità elettrica"),
+        "durezza": ("Durezza totale", "Durezza"),
+        "residuo": ("Residuo fisso calcolato", "Residuo fisso", "Residuo secco"),
+        "nitrati": ("Nitrati", "Nitrato"),
+        "arsenico": ("Arsenico",),
+        "calcio": ("Calcio",),
+        "magnesio": ("Magnesio",),
+        "sodio": ("Sodio",),
+        "potassio": ("Potassio",),
+        "cloruri": ("Cloruri", "Cloruro"),
+        "solfati": ("Solfati", "Solfato")
+    }
+    units = {
+        "ph": "pH", "conducibilita": "µS/cm", "durezza": "°f",
+        "residuo": "mg/L", "nitrati": "mg/L", "arsenico": "µg/L",
+        "calcio": "mg/L", "magnesio": "mg/L", "sodio": "mg/L",
+        "potassio": "mg/L", "cloruri": "mg/L", "solfati": "mg/L"
+    }
     found = []
     seen = set()
-    # Le righe dei rapporti Acqualatina contengono spesso:
-    # parametro | unità | limite/riferimento | valore misurato.
-    # Non confondere il limite con il valore.
-    pattern = re.compile(r"(?<![\w])(?:<\s*)?\d+(?:[.,]\d+)?")
+    number = re.compile(r"(?<![A-Za-z])(?:<\\s*)?\\d+(?:[.,]\\d+)?")
     with pdfplumber.open(io.BytesIO(data)) as pdf:
         for page in pdf.pages[:8]:
-            text = page.extract_text() or ""
-            for line in text.splitlines():
-                clean = " ".join(line.split())
-                norm = normalize(clean)
-                for key, labels in PARAMS.items():
-                    if key in seen or not any(norm.startswith(normalize(label)) for label in labels):
+            for line in (page.extract_text() or "").splitlines():
+                original = " ".join(line.split())
+                normal = normalize(original)
+                for key, names in aliases.items():
+                    if key in seen:
                         continue
-                    # Elimina il nome del parametro per evitare numeri nel nome.
-                    label = next(label for label in labels if norm.startswith(normalize(label)))
-                    remainder = clean[len(label):].strip()
-                    # Nei PDF Acqualatina il valore misurato è l'ultimo
-                    # elemento numerico della riga, ma è da verificare.
-                    nums = list(pattern.finditer(remainder))
-                    entry = {"parametro": labels[0], "riga_originale": clean[:250],
-                             "stato": "DA_VERIFICARE"}
+                    match = next((n for n in names if normal.startswith(normalize(n) + " ") or normal == normalize(n)), None)
+                    if not match:
+                        continue
+                    rest = original[len(match):].strip()
+                    nums = list(number.finditer(rest))
+                    item = {"parametro": PARAMS[key][0], "unita": units[key],
+                            "riga_originale": original[:250], "stato": "DA_VERIFICARE"}
                     if nums:
-                        last = nums[-1]
-                        raw = last.group().strip()
-                        if remainder[max(0, last.start()-2):last.start()].strip().endswith("<"):
-                            raw = "< " + raw
-                        entry["valore"] = raw
-                    found.append(entry)
+                        item["valore"] = nums[-1].group().replace(" ", "")
+                    found.append(item)
                     seen.add(key)
                     break
     return found
