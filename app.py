@@ -112,6 +112,18 @@ async def reports(comune: str = Query(min_length=2, max_length=100)):
                 "rapporti": [], "fonte": PROVIDER_LINKS[gestore],
                 "stato": "portale_collegato",
                 "avviso": "Portale ufficiale individuato; estrazione automatica non ancora disponibile."}
+    # Non cercare ogni comune del Lazio su Acqualatina:
+    # per i gestori non ancora mappati non attribuire una fonte sbagliata.
+    acqualatina_communes = {
+        "latina", "cisterna di latina", "aprilia", "formia", "gaeta",
+        "fondi", "terracina", "sabaudia", "sezze", "priverno",
+        "minturno", "sermoneta", "pontinia", "cori", "itri",
+        "san felice circeo", "sperlonga", "lenola", "monte san biagio"
+    }
+    if key not in acqualatina_communes:
+        return {"comune": comune, "gestore": "Da identificare",
+                "rapporti": [], "fonte": None, "stato": "gestore_da_mappare",
+                "avviso": "Non abbiamo ancora un connettore ufficiale verificato per questo comune. Nessun valore viene inventato."}
     try:
         async with httpx.AsyncClient(timeout=30, follow_redirects=True,
                                       headers={"User-Agent": "Mozilla/5.0"}) as client:
