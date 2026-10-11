@@ -61,8 +61,37 @@ def zone_matches(comune, title):
     # Cisterna di Latina -> Cisterna di Latina, anche con suffissi di zona.
     return t == q or t.startswith(q + " ") or t.startswith(q + "-")
 
+# Instradamento iniziale: non dedurre il gestore dalla sola provincia.
+# I comuni non elencati richiedono una mappatura ufficiale verificata.
+PROVIDER_LINKS = {
+    "Acea Ato 2": "https://www.aceaato2.a-acqua.it/qualita-acqua",
+    "Acea Ato 5": "https://www.aceaato5.a-acqua.it/qualita-acqua",
+}
+KNOWN_MUNICIPALITIES = {
+    "ladispoli": ("Acea Ato 2", "Roma"),
+    "roma": ("Acea Ato 2", "Roma"),
+    "frosinone": ("Acea Ato 5", "Frosinone"),
+}
+
+@app.get("/api/gestori")
+def providers():
+    return {"province": ["Roma", "Latina", "Frosinone", "Viterbo", "Rieti"],
+            "gestori": [
+                {"nome": "Acqualatina", "stato": "estrazione_sperimentale"},
+                {"nome": "Acea Ato 2", "stato": "portale_collegato"},
+                {"nome": "Acea Ato 5", "stato": "portale_collegato"},
+                {"nome": "Talete", "stato": "da_integrare"},
+                {"nome": "Acqua Pubblica Sabina", "stato": "da_integrare"}]}
+
 @app.get("/api/rapporti")
 async def reports(comune: str = Query(min_length=2, max_length=100)):
+    key = normalize(comune).strip()
+    if key in KNOWN_MUNICIPALITIES:
+        gestore, provincia = KNOWN_MUNICIPALITIES[key]
+        return {"comune": comune, "provincia": provincia, "gestore": gestore,
+                "rapporti": [], "fonte": PROVIDER_LINKS[gestore],
+                "stato": "portale_collegato",
+                "avviso": "Portale ufficiale individuato; estrazione automatica non ancora disponibile."}
     try:
         async with httpx.AsyncClient(timeout=30, follow_redirects=True,
                                       headers={"User-Agent": "Mozilla/5.0"}) as client:
@@ -91,6 +120,7 @@ async def reports(comune: str = Query(min_length=2, max_length=100)):
                           "tipo": "scheda" if not path.endswith(".pdf") else "pdf"}
         return {"comune": comune, "gestore": "Acqualatina",
                 "rapporti": list(found.values()), "fonte": SOURCE,
+                "stato": "estrazione_sperimentale" if found else "nessun_rapporto_identificato",
                 "avviso": "Selezionare la zona corretta e verificare data e valori."}
     except Exception as exc:
         raise HTTPException(502, detail="Fonte non disponibile: " + str(exc)[:180])
