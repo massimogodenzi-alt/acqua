@@ -357,3 +357,50 @@ async def controllo_gestori():
             return result
         checks = await asyncio.gather(*(check(*s) for s in sources))
     return {"gestori": checks, "nota": "Portale raggiungibile non significa parametri disponibili o estratti."}
+
+@app.get("/api/fonti-disponibili")
+async def fonti_disponibili(gestore: str = Query(min_length=2, max_length=80)):
+    """Cerca collegamenti a documenti e tabelle pubblicati nella pagina del gestore."""
+    sources = {
+        "Acqualatina": SOURCE,
+        "Acea Ato 2": PROVIDER_LINKS["Acea Ato 2"],
+        "Acea Ato 5": PROVIDER_LINKS["Acea Ato 5"],
+        "Talete": "https://www.taletespa.eu/",
+        "Acqua Pubblica Sabina": "https://www.acquapubblicasabina.it/"
+    }
+    if gestore not in sources:
+        raise HTTPException(404, detail="Gestore non presente nel registro")
+    source = sources[gestore]
+    try:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            response = await client.get(source)
+            response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
+        found = []
+        seen = set()
+        for a in soup.select("a[href]"):
+            url = urljoin(source, a.get("href", ""))
+            parsed = urlparse(url)
+            if parsed.scheme != "https" or parsed.hostname != urlparse(source).hostname:
+                continue
+            label = a.get_text(" ", strip=True)
+            ext = parsed.path.lower()
+            fmt = next((name for suffix, name in (
+                (".pdf", "PDF"), (".xlsx", "Excel"), (".xls", "Excel"),
+                (".csv", "CSV"), (".json", "JSON")) if ext.endswith(suffix)), None)
+            if fmt is None and any(word in normalize(label + " " + ext) for word in (
+                    "qualita", "analisi", "acqua", "parametr", "download")):
+                fmt = "Pagina web"
+            if fmt and url not in seen:
+                seen.add(url)
+                found.append({"titolo": label or parsed.path.rsplit("/", 1)[-1],
+                              "url": url, "formato": fmt, "stato": "da_analizzare"})
+            if len(found) >= 80:
+                break
+        return {"gestore": gestore, "fonte": source, "documenti": found,
+                "tabelle_nella_pagina": len(soup.select("table")),
+                "avviso": "Collegamenti rilevati automaticamente: non tutti contengono analisi dell'acqua."}
+    except Exception as exc:
+        return {"gestore": gestore, "fonte": source, "documenti": [],
+                "tabelle_nella_pagina": 0, "errore": type(exc).__name__,
+                "avviso": "Fonte non interrogabile al momento; dati non disponibili per verifica."}
