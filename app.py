@@ -1,18 +1,47 @@
-"""Treblex Acqua Lazio: ricerca sperimentale dei rapporti Acqualatina."""
-import io, re, unicodedata
-from urllib.parse import urljoin, urlparse
-import httpx, pdfplumber
+"""Treblex Acqua Lazio: acquisizione sperimentale dei rapporti Acqualatina."""
+import io
+import re
+import unicodedata
+from pathlib import Path
+from urllib.parse import urljoin, urlparse, parse_qs
+
+import httpx
+import pdfplumber
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
-from pathlib import Path
 
 app = FastAPI(title="Treblex Acqua Lazio")
 SOURCE = "https://www.acqualatina.it/qualita-dellacqua-per-comune/"
-PARAMS = ["Durezza", "Residuo fisso", "Conducibilità", "Nitrati", "Sodio", "Arsenico", "pH"]
+PARAMS = {
+    "ph": ("pH",), "durezza": ("Durezza",),
+    "conducibilita": ("Conducibilità elettrica", "Conducibilita elettrica"),
+    "residuo": ("Residuo secco", "Residuo fisso"),
+    "sodio": ("Sodio",), "nitrati": ("Nitrato", "Nitrati"),
+    "arsenico": ("Arsenico",), "calcio": ("Calcio",),
+    "magnesio": ("Magnesio",), "potassio": ("Potassio",),
+    "cloruri": ("Cloruro",), "solfati": ("Solfato",)
+}
 
 def normalize(s):
-    return "".join(c for c in unicodedata.normalize("NFKD", s.casefold()) if not unicodedata.combining(c))
+    return "".join(c for c in unicodedata.normalize("NFKD", str(s).casefold()) if not unicodedata.combining(c))
+
+def allowed(url):
+    p = urlparse(url)
+    return p.scheme == "https" and p.hostname in ("www.acqualatina.it", "acqualatina.it")
+
+def is_download(url):
+    p = urlparse(url)
+    return (p.path.lower().endswith(".pdf") or "wpdmdl" in parse_qs(p.query)
+            or "/download/" in p.path.lower() or "download" in p.path.lower()
+            or "/file/" in p.path.lower())
+
+def heading_name(tag):
+    for key in ("h2", "h3", "h4", "h5", "strong", "b"):
+        h = tag.find(key)
+        if h and h.get_text(" ", strip=True):
+            return h.get_text(" ", strip=True)
+    return ""
 
 @app.get("/", response_class=HTMLResponse)
 def home():
@@ -20,55 +49,101 @@ def home():
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "nota": "Non garantisce la disponibilità delle fonti esterne"}
+    return {"status": "ok"}
 
 @app.get("/api/rapporti")
 async def reports(comune: str = Query(min_length=2, max_length=100)):
     try:
-        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True,
+                                      headers={"User-Agent": "Mozilla/5.0 TreblexWaterResearch/1.0"}) as client:
             response = await client.get(SOURCE)
             response.raise_for_status()
         soup = BeautifulSoup(response.text, "html.parser")
-        matches = []
+        found = {}
+        # I documenti sono organizzati in schede: titolo zona + pulsante Download.
+        # Non cercare il comune nell'intera pagina: genera falsi positivi.
+        for header in soup.find_all(re.compile(r"^h[1-6]$")):
+            title = header.get_text(" ", strip=True)
+            if normalize(comune) not in normalize(title):
+                continue
+            candidates = []
+            for parent in list(header.parents)[:5]:
+                if parent.name in ("body", "html"):
+                    break
+                links = parent.select("a[href], a[data-downloadurl], a[data-url]")
+                links = [a for a in links if "download" in a.get_text(" ", strip=True).lower()
+                         or "pdf" in str(a.get("href", "")).lower()
+                         or "download" in str(a.get("class", "")).lower()]
+                if links and len(links) <= 8:
+                    candidates = links
+                    break
+            for a in candidates:
+                raw = a.get("data-downloadurl") or a.get("data-url") or a.get("href")
+                if not raw:
+                    continue
+                url = urljoin(SOURCE, raw)
+                if allowed(url) and is_download(url):
+                    found[url] = {"titolo": title, "url": url}
+        # Fallback: collegamenti PDF con nome del comune nel nome file o titolo.
         for a in soup.select("a[href]"):
             url = urljoin(SOURCE, a["href"])
-            if ".pdf" not in urlparse(url).path.lower() or not (urlparse(url).hostname or "").endswith("acqualatina.it"):
-                continue
-            if not a.get("href", "").lower().split("?")[0].endswith(".pdf"):
-                continue
-            parent = a.find_parent(["div", "li", "section", "article"])
-            context = parent.get_text(" ", strip=True)[:300] if parent else ""
-            title = a.get_text(" ", strip=True)
-            haystack = " ".join([title, context, url])
-            if normalize(comune) in normalize(title + " " + url):
-                matches.append({"titolo": title or "Rapporto PDF", "url": url})
-        return {"comune": comune, "gestore": "Acqualatina", "rapporti": matches,
-                "fonte": SOURCE, "avviso": "Ricerca sperimentale: verificare comune e zona nel documento."}
+            if allowed(url) and is_download(url):
+                title = a.get("title", "") or a.get_text(" ", strip=True)
+                if normalize(comune) in normalize(title + " " + url):
+                    found[url] = {"titolo": title or comune, "url": url}
+        return {"comune": comune, "gestore": "Acqualatina",
+                "rapporti": list(found.values()), "fonte": SOURCE,
+                "avviso": "Verificare zona e data del rapporto ufficiale."}
     except Exception as exc:
-        raise HTTPException(502, detail="Impossibile consultare la fonte: " + str(exc)[:180])
+        raise HTTPException(502, detail="Fonte non disponibile: " + str(exc)[:180])
+
+def parse_pdf(data):
+    found = []
+    with pdfplumber.open(io.BytesIO(data)) as pdf:
+        for page in pdf.pages[:8]:
+            for table in page.extract_tables() or []:
+                for row in table:
+                    cells = [" ".join(str(v or "").split()) for v in row]
+                    if len(cells) < 3:
+                        continue
+                    name = normalize(cells[0])
+                    for key, labels in PARAMS.items():
+                        if any(name == normalize(label) or name.startswith(normalize(label) + " ") for label in labels):
+                            value = cells[-1]
+                            if re.match(r"^\\s*[<>≤≥]?\\s*\\d+(?:[.,]\\d+)?\\s*$", value):
+                                found.append({"parametro": labels[0], "valore": value,
+                                              "unita": cells[1], "stato": "DA_VERIFICARE"})
+            if found:
+                continue
+            # Testo libero: restituiamo soltanto righe, senza indovinare colonne.
+            text = page.extract_text() or ""
+            for line in text.splitlines():
+                for key, labels in PARAMS.items():
+                    if any(normalize(line).startswith(normalize(label)) for label in labels):
+                        found.append({"parametro": labels[0], "riga_originale": line[:250],
+                                      "stato": "DA_VERIFICARE"})
+    return found
 
 @app.get("/api/analisi")
 async def analysis(url: str):
-    parsed = urlparse(url)
-    if parsed.scheme != "https" or parsed.hostname not in {"acqualatina.it", "www.acqualatina.it"} or not parsed.path.lower().endswith(".pdf"):
-        raise HTTPException(400, detail="Sono consentiti soltanto PDF Acqualatina")
+    if not allowed(url) or not is_download(url):
+        raise HTTPException(400, detail="Link Acqualatina non consentito")
     try:
-        async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
+        async with httpx.AsyncClient(timeout=35, follow_redirects=False) as client:
             response = await client.get(url)
-            response.raise_for_status()
-            if len(response.content) > 12000000 or not response.content.startswith(b"%PDF"):
-                raise ValueError("Documento non PDF o troppo grande")
-        with pdfplumber.open(io.BytesIO(response.content)) as pdf:
-            text = "\n".join((p.extract_text() or "") for p in pdf.pages[:8])
-        lines = text.splitlines()
-        findings = []
-        for name in PARAMS:
-            for line in lines:
-                if re.search(r"\b" + re.escape(name) + r"\b", line, re.I):
-                    findings.append({"parametro": name, "riga_originale": line.strip()[:250],
-                                     "stato": "DA_VERIFICARE"})
+            for _ in range(4):
+                if response.status_code not in (301, 302, 303, 307, 308):
                     break
-        return {"documento": url, "righe_da_verificare": findings,
-                "avviso": "Nessun valore viene certificato automaticamente. Verificare le righe nel PDF originale."}
+                next_url = urljoin(str(response.url), response.headers.get("location", ""))
+                if not allowed(next_url):
+                    raise ValueError("Il download reindirizza a un dominio non verificato")
+                response = await client.get(next_url)
+            response.raise_for_status()
+        if len(response.content) > 12000000 or not response.content.startswith(b"%PDF"):
+            raise ValueError("Il collegamento non ha restituito un PDF: occorre un adattatore per il download")
+        values = parse_pdf(response.content)
+        return {"documento": url, "parametri": values,
+                "righe_da_verificare": values,
+                "avviso": "Valori estratti automaticamente: controllare sempre zona, data e PDF."}
     except Exception as exc:
-        raise HTTPException(502, detail="PDF non leggibile: " + str(exc)[:180])
+        raise HTTPException(502, detail="Documento non leggibile: " + str(exc)[:180])
