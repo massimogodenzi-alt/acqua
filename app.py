@@ -32,14 +32,16 @@ async def reports(comune: str = Query(min_length=2, max_length=100)):
         matches = []
         for a in soup.select("a[href]"):
             url = urljoin(SOURCE, a["href"])
-            if ".pdf" not in urlparse(url).path.lower():
+            if ".pdf" not in urlparse(url).path.lower() or not (urlparse(url).hostname or "").endswith("acqualatina.it"):
+                continue
+            if not a.get("href", "").lower().split("?")[0].endswith(".pdf"):
                 continue
             parent = a.find_parent(["div", "li", "section", "article"])
             context = parent.get_text(" ", strip=True)[:300] if parent else ""
             title = a.get_text(" ", strip=True)
             haystack = " ".join([title, context, url])
-            if normalize(comune) in normalize(haystack):
-                matches.append({"titolo": title or context[:100] or "Rapporto", "url": url})
+            if normalize(comune) in normalize(title + " " + url):
+                matches.append({"titolo": title or "Rapporto PDF", "url": url})
         return {"comune": comune, "gestore": "Acqualatina", "rapporti": matches,
                 "fonte": SOURCE, "avviso": "Ricerca sperimentale: verificare comune e zona nel documento."}
     except Exception as exc:
