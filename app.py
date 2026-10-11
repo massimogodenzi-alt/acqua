@@ -67,6 +67,19 @@ PROVIDER_LINKS = {
     "Acea Ato 2": "https://www.aceaato2.a-acqua.it/qualita-acqua",
     "Acea Ato 5": "https://www.aceaato5.a-acqua.it/qualita-acqua",
 }
+ACEA_PDF_BASE = "https://www.aceaato2.a-acqua.it/content/dam/acea-ato2/pdf/it/mappe-qualita/"
+ROMA_ZONE_FILES = [
+    "roma_e_fiumicino_zona_1_monteverde_vecchio.pdf",
+    "roma_e_fiumicino_zona_2_peschiera_capore_%2B_vigne_nuove.pdf",
+    "roma_e_fiumicino_zona_3_peschiera_capore.pdf",
+    "roma_e_fiumicino_zona_4_nuovo_vergine_prevalente.pdf",
+    "roma_e_fiumicino_zona_5_acqua_marcia.pdf",
+    "roma_e_fiumicino_zona_6_appio_alessandrino_hc.pdf",
+    "roma_e_fiumicino_zona_7_appio_alessandrino_lc.pdf",
+    "roma_e_fiumicino_zona_8_acqua_marcia_%2B_peschiera_capore.pdf",
+    "roma_e_fiumicino_zona_9_ostia_e_acilia.pdf"
+]
+
 KNOWN_MUNICIPALITIES = {
     "ladispoli": ("Acea Ato 2", "Roma"),
     "roma": ("Acea Ato 2", "Roma"),
@@ -86,6 +99,11 @@ def providers():
 @app.get("/api/rapporti")
 async def reports(comune: str = Query(min_length=2, max_length=100)):
     key = normalize(comune).strip()
+    if key == "roma":
+        return {"comune": comune, "gestore": "Acea Ato 2", "provincia": "Roma",
+                "rapporti": [{"titolo": "Roma e Fiumicino — Zona " + str(i+1) + " — " + filename.split("_zona_")[1].replace(".pdf","").replace("_"," ").replace("%2B","+"), "url": ACEA_PDF_BASE + filename, "tipo": "pdf"} for i, filename in enumerate(ROMA_ZONE_FILES)],
+                "fonte": PROVIDER_LINKS["Acea Ato 2"], "stato": "estrazione_sperimentale",
+                "avviso": "Roma ha più zone idriche: scegliere quella corrispondente all’indirizzo. Verificare il periodo di riferimento nel PDF."}
     if key in KNOWN_MUNICIPALITIES:
         gestore, provincia = KNOWN_MUNICIPALITIES[key]
         return {"comune": comune, "provincia": provincia, "gestore": gestore,
@@ -246,8 +264,20 @@ async def extract(url: str):
 
 @app.get("/api/analisi")
 async def analysis(url: str):
+    if url.startswith(ACEA_PDF_BASE) and urlparse(url).path.lower().endswith(".pdf"):
+        try:
+            async with httpx.AsyncClient(timeout=35, follow_redirects=True) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+            if not response.content.startswith(b"%PDF") or len(response.content) > 12000000:
+                raise ValueError("PDF Acea non disponibile")
+            values = parse_pdf(response.content)
+            return {"documento": url, "parametri": values, "righe_da_verificare": values,
+                    "avviso": "Valori sperimentali; controllare la zona e il periodo nel PDF Acea."}
+        except Exception as exc:
+            raise HTTPException(502, detail="Lettura Acea non riuscita: " + str(exc)[:180])
     if not allowed(url):
-        raise HTTPException(400, detail="Fonte Acqualatina non consentita")
+        raise HTTPException(400, detail="Fonte non consentita")
     try:
         content, final_url = await fetch_report(url)
         values = parse_pdf(content)
