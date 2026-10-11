@@ -124,6 +124,54 @@ def parse_pdf(data):
                                       "stato": "DA_VERIFICARE"})
     return found
 
+def parse_html(data):
+    soup = BeautifulSoup(data, "html.parser")
+    findings = []
+    for table in soup.select("table"):
+        for tr in table.select("tr"):
+            cells = [cell.get_text(" ", strip=True) for cell in tr.select("th,td")]
+            if len(cells) < 2:
+                continue
+            label = normalize(cells[0])
+            for names in PARAMS.values():
+                if any(label == normalize(name) or label.startswith(normalize(name) + " ") for name in names):
+                    value = next((x for x in cells[1:] if re.search(r"(?<!\\w)[<>≤≥]?\\s*\\d+(?:[.,]\\d+)?", x)), None)
+                    if value:
+                        findings.append({"parametro": names[0], "riga_originale": " | ".join(cells),
+                                         "stato": "DA_VERIFICARE", "formato": "HTML"})
+    return findings
+
+@app.get("/api/estrai")
+async def extract(url: str):
+    """Lettura di una fonte ufficiale HTML o PDF; mai inventare valori."""
+    if not allowed(url):
+        raise HTTPException(400, detail="Fonte esterna non autorizzata")
+    try:
+        async with httpx.AsyncClient(timeout=35, follow_redirects=False) as client:
+            response = await client.get(url)
+            for _ in range(4):
+                if response.status_code not in (301, 302, 303, 307, 308):
+                    break
+                dest = urljoin(str(response.url), response.headers.get("location", ""))
+                if not allowed(dest):
+                    raise ValueError("Reindirizzamento esterno non consentito")
+                response = await client.get(dest)
+            response.raise_for_status()
+        if len(response.content) > 12000000:
+            raise ValueError("Documento troppo grande")
+        if response.content.startswith(b"%PDF"):
+            data = parse_pdf(response.content)
+            kind = "PDF"
+        elif "html" in response.headers.get("content-type", "").lower() or response.content.lstrip().startswith(b"<"):
+            data = parse_html(response.text)
+            kind = "HTML"
+        else:
+            raise ValueError("Formato non ancora supportato")
+        return {"documento": url, "formato": kind, "parametri": data,
+                "avviso": "Estrazione preliminare: verificare valori, zona e data sulla fonte."}
+    except Exception as exc:
+        raise HTTPException(502, detail="Estrazione non riuscita: " + str(exc)[:180])
+
 @app.get("/api/analisi")
 async def analysis(url: str):
     if not allowed(url) or not is_download(url):
