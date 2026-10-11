@@ -416,3 +416,13 @@ async def fonti_disponibili(gestore: str = Query(min_length=2, max_length=80)):
         return {"gestore": gestore, "fonte": source, "documenti": [],
                 "tabelle_nella_pagina": 0, "errore": type(exc).__name__,
                 "avviso": "Fonte non interrogabile al momento; dati non disponibili per verifica."}
+
+@app.get("/api/ricerca-territoriale")
+async def ricerca_territoriale(comune: str = Query(min_length=2, max_length=100)):
+    from urllib.parse import quote_plus
+    province = {"roma":"Roma","fiumicino":"Roma","ostia":"Roma","ladispoli":"Roma","latina":"Latina","aprilia":"Latina","frosinone":"Frosinone","viterbo":"Viterbo","rieti":"Rieti"}
+    provincia = province.get(normalize(comune).strip())
+    query = comune + " " + (provincia or "Lazio") + " analisi acqua potabile gestore ultimo rapporto"
+    return {"comune":comune,"provincia":provincia,"stato":"ricerca_preparata",
+            "ricerca_web":"https://www.google.com/search?q="+quote_plus(query),
+            "avviso":"La ricerca apre Google; i risultati non sono ancora importati automaticamente."}
