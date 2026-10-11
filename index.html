@@ -1,5 +1,21 @@
-<!doctype html><html lang="it"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Treblex Acqua Lazio</title><style>body{font:16px system-ui;background:#edf5fa;color:#123;max-width:780px;margin:45px auto;padding:20px}main{background:white;padding:28px;border-radius:18px}input,button{font:inherit;padding:12px;border-radius:8px}input{width:60%;border:1px solid #bbb}button{background:#006c90;color:white;border:0;cursor:pointer}article{padding:14px;border:1px solid #ddd;margin:12px 0;border-radius:8px}small{color:#567}</style><main><h1>Treblex · Acqua Lazio</h1><p><strong>Prototipo sperimentale</strong> — ricerca delle analisi ufficiali. Acqualatina: lettura sperimentale; altri gestori: integrazione in corso.</p><label for="comune">Comune del Lazio</label><p><input id="comune" placeholder="Es. Latina"><button onclick="search()">Cerca</button></p><div id="out" role="status"></div><small>Le informazioni non sostituiscono il rapporto ufficiale della zona di distribuzione.</small></main><script>
+<!doctype html><html lang="it"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Treblex Acqua Lazio</title><style>body{font:16px system-ui;background:#edf5fa;color:#123;max-width:780px;margin:45px auto;padding:20px}main{background:white;padding:28px;border-radius:18px}input,button{font:inherit;padding:12px;border-radius:8px}input{width:60%;border:1px solid #bbb}button{background:#006c90;color:white;border:0;cursor:pointer}article{padding:14px;border:1px solid #ddd;margin:12px 0;border-radius:8px}small{color:#567}</style><main><h1>Treblex · Acqua Lazio</h1><p><strong>Prototipo sperimentale</strong> — ricerca delle analisi ufficiali. Acqualatina: lettura sperimentale; altri gestori: integrazione in corso.</p><label for="comune">Comune del Lazio</label><p><input id="comune" placeholder="Es. Latina"><button onclick="search()">Cerca</button></p><div id="out" role="status"></div><section><h2>Controllo gestori Lazio</h2><button onclick="checkProviders()">Verifica gestori</button><div id="providers"></div></section><small>Le informazioni non sostituiscono il rapporto ufficiale della zona di distribuzione.</small></main><script>
 const out=document.getElementById('out');
+async function checkProviders(){
+const el=document.getElementById('providers');el.textContent='Verifica in corso...';
+try {
+const response=await fetch('/api/controllo-gestori');
+const result=await response.json();
+if(!response.ok)throw Error('Controllo non disponibile');
+el.replaceChildren();
+for(const p of result.gestori){
+const item=document.createElement('article');
+const name=document.createElement('strong');name.textContent=p.gestore+' ('+p.province+')';
+const detail=document.createElement('p');detail.textContent='Portale: '+p.stato+' | Lettura: '+p.estrazione+' | Formato: '+p.formato;
+const link=document.createElement('a');link.href=p.fonte;link.textContent='Fonte ufficiale';link.target='_blank';link.rel='noopener';
+item.append(name,detail,link);el.append(item);
+}
+}catch(error){el.textContent='Errore: '+error.message}
+}
 function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 async function search(){
 let comune=document.getElementById('comune').value.trim();if(comune.length<2)return;
