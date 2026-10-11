@@ -12,7 +12,10 @@ const item=document.createElement('article');
 const name=document.createElement('strong');name.textContent=p.gestore+' ('+p.province+')';
 const detail=document.createElement('p');detail.textContent='Portale: '+p.stato+' | Lettura: '+p.estrazione+' | Formato: '+p.formato;
 const link=document.createElement('a');link.href=p.fonte;link.textContent='Fonte ufficiale';link.target='_blank';link.rel='noopener';
-item.append(name,detail,link);el.append(item);
+const button=document.createElement('button');button.textContent='Cerca dati pubblicati';button.style.marginLeft='10px';
+const results=document.createElement('div');
+button.onclick=async()=>{results.textContent='Ricerca delle fonti...';try{const r=await fetch('/api/fonti-disponibili?gestore='+encodeURIComponent(p.gestore));const data=await r.json();if(!r.ok)throw Error(data.detail||'Errore');results.replaceChildren();const summary=document.createElement('p');summary.textContent='Documenti o pagine individuati: '+data.documenti.length+' · Tabelle nella pagina: '+data.tabelle_nella_pagina+'. Non sono ancora valori verificati.';results.append(summary);for(const d of data.documenti){const line=document.createElement('p');const a=document.createElement('a');a.href=d.url;a.textContent=(d.titolo||'Documento')+' ['+d.formato+']';a.target='_blank';a.rel='noopener';line.append(a);results.append(line)}if(data.errore)results.textContent='Fonte non accessibile al momento: '+data.errore}catch(e){results.textContent='Ricerca non riuscita: '+e.message}};
+item.append(name,detail,link,button,results);el.append(item);
 }
 }catch(error){el.textContent='Errore: '+error.message}
 }
