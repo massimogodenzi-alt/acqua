@@ -51,6 +51,16 @@ def home():
 def health():
     return {"status": "ok"}
 
+def zone_matches(comune, title):
+    """Confronta il nome del comune con l'inizio della zona, non con sottostringhe."""
+    q = normalize(comune).strip()
+    t = normalize(title).strip()
+    if not q or not t:
+        return False
+    # Latina -> Latina Nord; esclude Cisterna di Latina.
+    # Cisterna di Latina -> Cisterna di Latina, anche con suffissi di zona.
+    return t == q or t.startswith(q + " ") or t.startswith(q + "-")
+
 @app.get("/api/rapporti")
 async def reports(comune: str = Query(min_length=2, max_length=100)):
     try:
@@ -73,7 +83,7 @@ async def reports(comune: str = Query(min_length=2, max_length=100)):
             # Il nome della zona deve essere nel titolo della scheda,
             # oppure nello slug della pagina dedicata.
             slug = path.rstrip("/").split("/")[-1].replace("-", " ")
-            if normalize(comune) not in normalize(title + " " + slug):
+            if not zone_matches(comune, slug) and not zone_matches(comune, title):
                 continue
             if title.casefold() == "download":
                 continue
@@ -123,29 +133,37 @@ async def fetch_report(url):
 
 def parse_pdf(data):
     found = []
+    seen = set()
+    # Le righe dei rapporti Acqualatina contengono spesso:
+    # parametro | unità | limite/riferimento | valore misurato.
+    # Non confondere il limite con il valore.
+    pattern = re.compile(r"(?<![\\w])(?:<\\s*)?\\d+(?:[.,]\\d+)?")
     with pdfplumber.open(io.BytesIO(data)) as pdf:
         for page in pdf.pages[:8]:
-            for table in page.extract_tables() or []:
-                for row in table:
-                    cells = [" ".join(str(v or "").split()) for v in row]
-                    if len(cells) < 3:
-                        continue
-                    name = normalize(cells[0])
-                    for key, labels in PARAMS.items():
-                        if any(name == normalize(label) or name.startswith(normalize(label) + " ") for label in labels):
-                            value = cells[-1]
-                            if re.match(r"^\\s*[<>≤≥]?\\s*\\d+(?:[.,]\\d+)?\\s*$", value):
-                                found.append({"parametro": labels[0], "valore": value,
-                                              "unita": cells[1], "stato": "DA_VERIFICARE"})
-            if found:
-                continue
-            # Testo libero: restituiamo soltanto righe, senza indovinare colonne.
             text = page.extract_text() or ""
             for line in text.splitlines():
+                clean = " ".join(line.split())
+                norm = normalize(clean)
                 for key, labels in PARAMS.items():
-                    if any(normalize(line).startswith(normalize(label)) for label in labels):
-                        found.append({"parametro": labels[0], "riga_originale": line[:250],
-                                      "stato": "DA_VERIFICARE"})
+                    if key in seen or not any(norm.startswith(normalize(label)) for label in labels):
+                        continue
+                    # Elimina il nome del parametro per evitare numeri nel nome.
+                    label = next(label for label in labels if norm.startswith(normalize(label)))
+                    remainder = clean[len(label):].strip()
+                    # Nei PDF Acqualatina il valore misurato è l'ultimo
+                    # elemento numerico della riga, ma è da verificare.
+                    nums = list(pattern.finditer(remainder))
+                    entry = {"parametro": labels[0], "riga_originale": clean[:250],
+                             "stato": "DA_VERIFICARE"}
+                    if nums:
+                        last = nums[-1]
+                        raw = last.group().strip()
+                        if remainder[max(0, last.start()-2):last.start()].strip().endswith("<"):
+                            raw = "< " + raw
+                        entry["valore"] = raw
+                    found.append(entry)
+                    seen.add(key)
+                    break
     return found
 
 def parse_html(data):
