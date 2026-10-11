@@ -426,3 +426,19 @@ async def ricerca_territoriale(comune: str = Query(min_length=2, max_length=100)
     return {"comune":comune,"provincia":provincia,"stato":"ricerca_preparata",
             "ricerca_web":"https://www.google.com/search?q="+quote_plus(query),
             "avviso":"La ricerca apre Google; i risultati non sono ancora importati automaticamente."}
+
+@app.get("/api/gestore-nazionale")
+def gestore_nazionale(comune: str = Query(min_length=2, max_length=100)):
+    """Ricerca manuale nazionale tramite anagrafica territoriale ARERA."""
+    from urllib.parse import quote_plus
+    query = comune.strip()
+    return {
+        "comune": query,
+        "stato": "verifica_manuale_arera",
+        "registro_ufficiale": "https://www.arera.it/area-operatori/ricerca-operatori",
+        "istruzioni": "Apri ARERA, scegli PER TERRITORIO, seleziona il comune e l'attivita Servizi idrici / Acquedotto - Distribuzione.",
+        "ricerca_sito_gestore": "https://www.google.com/search?q=" + quote_plus(query + " gestore servizio idrico acquedotto distribuzione sito ufficiale"),
+        "ricerca_analisi": "https://www.google.com/search?q=" + quote_plus(query + " analisi acqua potabile qualita gestore"),
+        "gestore": None,
+        "avviso": "Il nome del gestore non e ancora acquisito automaticamente. Verificalo sul registro ARERA prima di inserire dati."
+    }
