@@ -55,47 +55,71 @@ def health():
 async def reports(comune: str = Query(min_length=2, max_length=100)):
     try:
         async with httpx.AsyncClient(timeout=30, follow_redirects=True,
-                                      headers={"User-Agent": "Mozilla/5.0 TreblexWaterResearch/1.0"}) as client:
+                                      headers={"User-Agent": "Mozilla/5.0"}) as client:
             response = await client.get(SOURCE)
             response.raise_for_status()
         soup = BeautifulSoup(response.text, "html.parser")
         found = {}
-        # I documenti sono organizzati in schede: titolo zona + pulsante Download.
-        # Non cercare il comune nell'intera pagina: genera falsi positivi.
-        for header in soup.find_all(re.compile(r"^h[1-6]$")):
-            title = header.get_text(" ", strip=True)
-            if normalize(comune) not in normalize(title):
+        # Acqualatina usa schede WordPress Download Manager:
+        # il titolo della zona punta a /download/nome-zona/.
+        for a in soup.select('a[href]'):
+            title = a.get_text(" ", strip=True)
+            url = urljoin(SOURCE, a.get("href", ""))
+            if not allowed(url):
                 continue
-            candidates = []
-            for parent in list(header.parents)[:5]:
-                if parent.name in ("body", "html"):
-                    break
-                links = parent.select("a[href], a[data-downloadurl], a[data-url]")
-                links = [a for a in links if "download" in a.get_text(" ", strip=True).lower()
-                         or "pdf" in str(a.get("href", "")).lower()
-                         or "download" in str(a.get("class", "")).lower()]
-                if links and len(links) <= 8:
-                    candidates = links
-                    break
-            for a in candidates:
-                raw = a.get("data-downloadurl") or a.get("data-url") or a.get("href")
-                if not raw:
-                    continue
-                url = urljoin(SOURCE, raw)
-                if allowed(url) and is_download(url):
-                    found[url] = {"titolo": title, "url": url}
-        # Fallback: collegamenti PDF con nome del comune nel nome file o titolo.
-        for a in soup.select("a[href]"):
-            url = urljoin(SOURCE, a["href"])
-            if allowed(url) and is_download(url):
-                title = a.get("title", "") or a.get_text(" ", strip=True)
-                if normalize(comune) in normalize(title + " " + url):
-                    found[url] = {"titolo": title or comune, "url": url}
+            path = urlparse(url).path.lower()
+            if "/download/" not in path and not path.endswith(".pdf"):
+                continue
+            # Il nome della zona deve essere nel titolo della scheda,
+            # oppure nello slug della pagina dedicata.
+            slug = path.rstrip("/").split("/")[-1].replace("-", " ")
+            if normalize(comune) not in normalize(title + " " + slug):
+                continue
+            if title.casefold() == "download":
+                continue
+            found[url] = {"titolo": title or slug.title(), "url": url,
+                          "tipo": "scheda" if not path.endswith(".pdf") else "pdf"}
         return {"comune": comune, "gestore": "Acqualatina",
                 "rapporti": list(found.values()), "fonte": SOURCE,
-                "avviso": "Verificare zona e data del rapporto ufficiale."}
+                "avviso": "Selezionare la zona corretta e verificare data e valori."}
     except Exception as exc:
         raise HTTPException(502, detail="Fonte non disponibile: " + str(exc)[:180])
+
+async def fetch_report(url):
+    """Segue scheda di download e link locali, senza accedere a host esterni."""
+    async with httpx.AsyncClient(timeout=35, follow_redirects=False,
+                                  headers={"User-Agent": "Mozilla/5.0"}) as client:
+        for _ in range(6):
+            if not allowed(url):
+                raise ValueError("Fonte esterna non autorizzata")
+            response = await client.get(url)
+            if response.status_code in (301, 302, 303, 307, 308):
+                url = urljoin(url, response.headers.get("location", ""))
+                continue
+            response.raise_for_status()
+            if len(response.content) > 12000000:
+                raise ValueError("Documento troppo grande")
+            if response.content.startswith(b"%PDF"):
+                return response.content, str(response.url)
+            soup = BeautifulSoup(response.text, "html.parser")
+            # Priorità ai collegamenti WordPress Download Manager.
+            options = []
+            for a in soup.select('a[href], a[data-downloadurl]'):
+                raw = a.get("data-downloadurl") or a.get("href", "")
+                candidate = urljoin(url, raw)
+                if not allowed(candidate) or candidate == url:
+                    continue
+                label = (a.get_text(" ", strip=True) + " " + str(a.get("class", ""))).lower()
+                path = urlparse(candidate).path.lower()
+                query = parse_qs(urlparse(candidate).query)
+                score = (10 if "wpdmdl" in query else 0) + (5 if path.endswith(".pdf") else 0) + (3 if "download" in label else 0)
+                if score >= 3:
+                    options.append((score, candidate))
+            if not options:
+                raise ValueError("Nella scheda non è stato trovato un link di download riconoscibile")
+            options.sort(reverse=True)
+            url = options[0][1]
+        raise ValueError("Troppi passaggi nel download")
 
 def parse_pdf(data):
     found = []
@@ -174,24 +198,13 @@ async def extract(url: str):
 
 @app.get("/api/analisi")
 async def analysis(url: str):
-    if not allowed(url) or not is_download(url):
-        raise HTTPException(400, detail="Link Acqualatina non consentito")
+    if not allowed(url):
+        raise HTTPException(400, detail="Fonte Acqualatina non consentita")
     try:
-        async with httpx.AsyncClient(timeout=35, follow_redirects=False) as client:
-            response = await client.get(url)
-            for _ in range(4):
-                if response.status_code not in (301, 302, 303, 307, 308):
-                    break
-                next_url = urljoin(str(response.url), response.headers.get("location", ""))
-                if not allowed(next_url):
-                    raise ValueError("Il download reindirizza a un dominio non verificato")
-                response = await client.get(next_url)
-            response.raise_for_status()
-        if len(response.content) > 12000000 or not response.content.startswith(b"%PDF"):
-            raise ValueError("Il collegamento non ha restituito un PDF: occorre un adattatore per il download")
-        values = parse_pdf(response.content)
-        return {"documento": url, "parametri": values,
+        content, final_url = await fetch_report(url)
+        values = parse_pdf(content)
+        return {"documento": final_url, "parametri": values,
                 "righe_da_verificare": values,
-                "avviso": "Valori estratti automaticamente: controllare sempre zona, data e PDF."}
+                "avviso": "Estrazione preliminare: controllare zona, data e valori sul PDF."}
     except Exception as exc:
         raise HTTPException(502, detail="Documento non leggibile: " + str(exc)[:180])
